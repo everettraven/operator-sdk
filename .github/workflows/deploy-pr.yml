@@ -1,0 +1,59 @@
+name: Automated Deployment PR
+
+on:
+  workflow_dispatch:
+    inputs:
+      release-version:
+        description: The branch to use/create for a release
+        required: true
+      is-patch:
+        description: Flag to tell if this is a patch release
+        required: true
+        type: boolean
+        default: false
+
+jobs:
+  create-release-pr:
+    name: create-release-pr
+    runs-on: ubuntu-20.04
+    environment: deploy
+    steps:
+      - name: checkout repository 
+        uses: actions/checkout@v3
+      - name: output release branch based on release-version input
+        run: |
+          echo "::set-output name=branch::$(expr "${{ inputs.release-version }}" : '\([v][0-9]*.[0-9]*.\)')x"
+        id: release-branch
+      - name: checkout release branch (create it if it doesn't exist)
+        run: |
+          git checkout ${{ steps.release-branch.branch }} || git checkout -b ${{ steps.release-branch.branch }}
+      - name: push new branch 
+        if: ${{ inputs.is-patch == 'false'}}
+        run: |
+          git push -u origin ${{ steps.release-branch.branch }}
+      - name: change Makefile IMAGE_VERSION
+        run: |
+          sed -i -E 's/(IMAGE_VERSION = ).+/\1$(echo ${{ inputs.release-version }}/g' Makefile
+      - name: create a new release branch for release commit
+        run: |
+          git checkout master
+          git pull
+          git checkout -b release-${{ inputs.release-version }}
+      - name: Run prerelease make target
+        run: make prerelease
+      - name: commit changes
+        run: |
+          git add Makefile changelog website testdata
+          git commit -m "Release ${{ inputs.release-version }}"
+          git push -u origin release-${{ inputs.release-version }}
+      - name: create PR
+        uses: peter-evans/create-pull-request@v3
+        with:
+          title: "[release-${{ inputs.release-version }}] release(operator-sdk): ${{ inputs.release-version }}"
+          commit-message: |
+            [release-${{ inputs.release-version }}] release(operator-sdk): ${{ inputs.release-version }}
+
+            Signed-off-by: ${{ github.actor }} <${{ github.actor }}@users.noreply.github.com>
+          body: "New operator-sdk release created by https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          delete-branch: true
+          branch-suffix: short-commit-hash

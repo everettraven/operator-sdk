@@ -1,0 +1,41 @@
+name: Automated Deployment Tagging
+
+on:
+  workflow_dispatch:
+    inputs:
+      release-version:
+        description: The version to be released
+        required: true
+      is-y-stream-patch:
+        type: boolean
+        description: If this is a patch release is it on the latest y-stream?
+        required: true
+        default: false
+
+jobs:
+  create-release-tag:
+    name: create-release-tag
+    runs-on: ubuntu-20.04
+    environment: deploy
+    steps:
+      - name: checkout repository 
+        uses: actions/checkout@v3
+      - name: output release branch based on release-version input
+        run: |
+          echo "::set-output name=branch::$(expr "${{ inputs.release-version }}" : '\([v][0-9]*.[0-9]*.\)')x"
+        id: release-branch
+      - name: run tag make target
+        run: make tag
+      - name: push tags
+        run: git push origin refs/tags/${{ inputs.release-version }}
+      - name: fast forward latest branch
+        if: ${{ inputs.is-y-stream-patch == 'true' }}
+        run: |
+          git checkout latest
+          git reset --hard refs/tags/${{ inputs.release-version }}
+          git push -f origin latest
+      - name: fast forward release branch
+        run: |
+          git checkout ${{ steps.release-branch.branch }}
+          git reset --hard refs/tags/${{ inputs.release-version }}
+          git push -f origin ${{ steps.release-branch.branch }}
