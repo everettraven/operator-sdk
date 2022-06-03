@@ -335,6 +335,7 @@ func getConfigMaps(fbcContent, namespace string) ([]corev1.ConfigMap, error) {
 		return nil, fmt.Errorf("encountered an error getting partitions: %w", err)
 	}
 
+	// TODO: check if size of contents is to big and break into even smaller config maps
 	for k, v := range partitions {
 		cms = append(cms, corev1.ConfigMap{
 			TypeMeta: metav1.TypeMeta{
