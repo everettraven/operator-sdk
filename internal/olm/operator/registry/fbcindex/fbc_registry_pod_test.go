@@ -15,7 +15,6 @@ package fbcindex
 
 import (
 	"encoding/json"
-	"fmt"
 	"testing"
 
 	. "github.com/onsi/ginkgo"
@@ -39,6 +38,10 @@ var _ = Describe("FBC Registry Pod tests", func() {
 			partition2Package declarativeconfig.Package
 
 			fbc *declarativeconfig.DeclarativeConfig
+
+			fbcContents        string
+			partition1Contents string
+			partition2Contents string
 		)
 		BeforeEach(func() {
 			partition1Package = declarativeconfig.Package{
@@ -156,6 +159,16 @@ var _ = Describe("FBC Registry Pod tests", func() {
 				Bundles:  bundles,
 				Others:   others,
 			}
+
+			var err error
+			fbcContents, err = fbcutil.ValidateAndStringify(fbc)
+			Expect(err).NotTo(HaveOccurred())
+
+			partition1Contents, err = fbcutil.ValidateAndStringify(partition1)
+			Expect(err).NotTo(HaveOccurred())
+
+			partition2Contents, err = fbcutil.ValidateAndStringify(partition2)
+			Expect(err).NotTo(HaveOccurred())
 		})
 
 		It("getDeclarativeConfigForPackage() should return declarative config for test-package-1", func() {
@@ -177,20 +190,27 @@ var _ = Describe("FBC Registry Pod tests", func() {
 		})
 
 		It("partitionFBC() should return a map of packages to FBC contents", func() {
-			fbcContents, err := fbcutil.ValidateAndStringify(fbc)
-			Expect(err).NotTo(HaveOccurred())
-			fmt.Println(fbcContents)
-
-			partition1Contents, err := fbcutil.ValidateAndStringify(partition1)
-			Expect(err).NotTo(HaveOccurred())
-
-			partition2Contents, err := fbcutil.ValidateAndStringify(partition2)
-			Expect(err).NotTo(HaveOccurred())
-
 			partitions, err := partitionFBC(fbcContents)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(partitions).Should(HaveKeyWithValue("test-package-1", partition1Contents))
 			Expect(partitions).Should(HaveKeyWithValue("test-package-2", partition2Contents))
+		})
+
+		It("getConfigMaps() should return 2 ConfigMaps with FBC contents", func() {
+			configMaps, err := getConfigMaps(fbcContents, "namespace")
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(len(configMaps)).Should(Equal(2))
+
+			Expect(configMaps[0].Kind).Should(Equal("ConfigMap"))
+			Expect(configMaps[0].Name).Should(Equal("operator-sdk-run-bundle-config-test-package-1"))
+			Expect(configMaps[0].Namespace).Should(Equal("namespace"))
+			Expect(configMaps[0].Data).Should(HaveKeyWithValue("test-package-1", partition1Contents))
+
+			Expect(configMaps[1].Kind).Should(Equal("ConfigMap"))
+			Expect(configMaps[1].Name).Should(Equal("operator-sdk-run-bundle-config-test-package-2"))
+			Expect(configMaps[1].Namespace).Should(Equal("namespace"))
+			Expect(configMaps[1].Data).Should(HaveKeyWithValue("test-package-2", partition2Contents))
 		})
 	})
 })

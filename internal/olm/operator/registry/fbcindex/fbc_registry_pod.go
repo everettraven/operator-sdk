@@ -204,32 +204,49 @@ func (f *FBCRegistryPod) podForBundleRegistry(cs *v1alpha1.CatalogSource) (*core
 		return nil, err
 	}
 
-	// configMaps := getConfigMaps(f.FBCContent)
+	configMaps, err := getConfigMaps(f.FBCContent, f.cfg.Namespace)
+	if err != nil {
+		return nil, fmt.Errorf("encountered an error getting ConfigMaps for registry pod: %w", err)
+	}
+
+	volumes := []corev1.Volume{}
+	volumeMounts := []corev1.VolumeMount{}
 
 	// (todo) remove comment: ConfigMap related
-	// create a ConfigMap
-	cm := &corev1.ConfigMap{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: corev1.SchemeGroupVersion.String(),
-			Kind:       "ConfigMap",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "operator-sdk-run-bundle-config",
-			Namespace: f.cfg.Namespace,
-		},
-		Data: map[string]string{
-			"test": f.FBCContent,
-		},
-	}
+	for _, cm := range configMaps {
+		// set owner reference by making catalog source the owner of ConfigMap object
+		if err := controllerutil.SetOwnerReference(cs, &cm, f.cfg.Scheme); err != nil {
+			return nil, fmt.Errorf("set configmap %q owner reference: %v", cm.GetName(), err)
+		}
 
-	// set owner reference by making catalog source the owner of ConfigMap object
-	if err := controllerutil.SetOwnerReference(cs, cm, f.cfg.Scheme); err != nil {
-		return nil, fmt.Errorf("set configmap %q owner reference: %v", cm.GetName(), err)
-	}
+		// create ConfigMap
+		if err := f.cfg.Client.Create(context.TODO(), &cm); err != nil {
+			return nil, fmt.Errorf("error creating ConfigMap: %w", err)
+		}
 
-	// create ConfigMap
-	if err := f.cfg.Client.Create(context.TODO(), cm); err != nil {
-		return nil, fmt.Errorf("error creating ConfigMap: %w", err)
+		volumes = append(volumes, corev1.Volume{
+			Name: k8sutil.TrimDNS1123Label(cm.Name + "-volume"),
+			VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					// Items: []corev1.KeyToPath{
+					// 	{
+					// 		Key:  cm.Name,
+					// 		Path: cm.Name,
+					// 	},
+					// },
+					LocalObjectReference: corev1.LocalObjectReference{
+						Name: cm.Name,
+					},
+				},
+			},
+		})
+
+		volumeMounts = append(volumeMounts, corev1.VolumeMount{
+			Name: k8sutil.TrimDNS1123Label(cm.Name + "-volume"),
+			// MountPath: path.Join(DefaultFBCIndexRootDir, cm.Name),
+			MountPath: path.Join(DefaultFBCIndexRootDir),
+			// SubPath:   cm.Name,
+		})
 	}
 
 	// make the pod definition
@@ -239,24 +256,7 @@ func (f *FBCRegistryPod) podForBundleRegistry(cs *v1alpha1.CatalogSource) (*core
 			Namespace: f.cfg.Namespace,
 		},
 		Spec: corev1.PodSpec{
-			Volumes: []corev1.Volume{
-				{
-					Name: k8sutil.TrimDNS1123Label(cm.Name + "-volume"),
-					VolumeSource: corev1.VolumeSource{
-						ConfigMap: &corev1.ConfigMapVolumeSource{
-							// Items: []corev1.KeyToPath{
-							// 	{
-							// 		Key:  cm.Name,
-							// 		Path: cm.Name,
-							// 	},
-							// },
-							LocalObjectReference: corev1.LocalObjectReference{
-								Name: cm.Name,
-							},
-						},
-					},
-				},
-			},
+			Volumes: volumes,
 			Containers: []corev1.Container{
 				{
 					Name:  defaultContainerName,
@@ -269,14 +269,7 @@ func (f *FBCRegistryPod) podForBundleRegistry(cs *v1alpha1.CatalogSource) (*core
 					Ports: []corev1.ContainerPort{
 						{Name: defaultContainerPortName, ContainerPort: f.GRPCPort},
 					},
-					VolumeMounts: []corev1.VolumeMount{
-						{
-							Name: k8sutil.TrimDNS1123Label(cm.Name + "-volume"),
-							// MountPath: path.Join(DefaultFBCIndexRootDir, cm.Name),
-							MountPath: path.Join(DefaultFBCIndexRootDir),
-							// SubPath:   cm.Name,
-						},
-					},
+					VolumeMounts: volumeMounts,
 				},
 			},
 			// (todo) remove comment (not configmap related).
@@ -334,35 +327,40 @@ func (f *FBCRegistryPod) getContainerCmd() (string, error) {
 	return out.String(), nil
 }
 
-// func getConfigMaps(fbcContent string) ([]corev1.ConfigMap, error) {
-// 	cms := []corev1.ConfigMap{}
+func getConfigMaps(fbcContent, namespace string) ([]corev1.ConfigMap, error) {
+	cms := []corev1.ConfigMap{}
 
-// 	partitions, err := partitionFBC(fbcContent)
+	partitions, err := partitionFBC(fbcContent)
+	if err != nil {
+		return nil, fmt.Errorf("encountered an error getting partitions: %w", err)
+	}
 
-// 	return cms, nil
-// }
+	for k, v := range partitions {
+		cms = append(cms, corev1.ConfigMap{
+			TypeMeta: metav1.TypeMeta{
+				APIVersion: corev1.SchemeGroupVersion.String(),
+				Kind:       "ConfigMap",
+			},
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      fmt.Sprintf("operator-sdk-run-bundle-config-%s", k),
+				Namespace: namespace,
+			},
+			Data: map[string]string{
+				k: v,
+			},
+		})
+	}
+
+	return cms, nil
+}
 
 func partitionFBC(fbcContent string) (map[string]string, error) {
 	partitions := map[string]string{}
-
-	declcfg := &declarativeconfig.DeclarativeConfig{}
 
 	declcfg, err := unmarshalFBC(fbcContent)
 	if err != nil {
 		return nil, fmt.Errorf("encountered an error unmarshaling FBC contents: %w | %s", err, fbcContent)
 	}
-
-	// jsonFBC, err := yaml.YAMLToJSON([]byte(fbcContent))
-	// if err != nil {
-	// 	return nil, fmt.Errorf("encountered an error converting FBC YAML to JSON: %w | %s", err, fbcContent)
-	// }
-
-	// fmt.Println(string(jsonFBC))
-
-	// err = json.Unmarshal([]byte(jsonFBC), declcfg)
-	// if err != nil {
-	// 	return nil, fmt.Errorf("encountered an error unmarshaling FBC contents: %w | %s", err, fbcContent)
-	// }
 
 	for _, pack := range declcfg.Packages {
 		packDecl := getDeclarativeConfigForPackage(pack, declcfg)
@@ -406,6 +404,7 @@ func unmarshalFBC(fbcContent string) (*declarativeconfig.DeclarativeConfig, erro
 	declcfg := &declarativeconfig.DeclarativeConfig{}
 
 	decoder := yaml.NewDecoder(bytes.NewBufferString(fbcContent))
+	decoder.KnownFields(true)
 
 	for {
 		helper := &FBCCatchAll{}
@@ -418,7 +417,6 @@ func unmarshalFBC(fbcContent string) (*declarativeconfig.DeclarativeConfig, erro
 			return &declarativeconfig.DeclarativeConfig{}, fmt.Errorf("encountered an error when decoding FBC contents: %w", err)
 		}
 
-		fmt.Println("HELPER: ", helper)
 		properties, err := parseProperties(helper)
 		if err != nil {
 			return &declarativeconfig.DeclarativeConfig{}, fmt.Errorf("encountered an error when getting properties for a FBC item: %w", err)
@@ -431,19 +429,29 @@ func unmarshalFBC(fbcContent string) (*declarativeconfig.DeclarativeConfig, erro
 				Properties: properties,
 				// TODO: Find out why this is not parsing correctly
 				DefaultChannel: helper.DefaultChannel,
-				Icon:           helper.Icon,
-				Description:    helper.Description,
+				Icon: &declarativeconfig.Icon{
+					Data:      []byte(helper.Icon.Data),
+					MediaType: helper.Icon.MediaType,
+				},
+				Description: helper.Description,
 			}
 
 			declcfg.Packages = append(declcfg.Packages, pack)
 
 		case "olm.bundle":
+			relatedImages := []declarativeconfig.RelatedImage{}
+			for _, ri := range helper.RelatedImages {
+				relatedImages = append(relatedImages, declarativeconfig.RelatedImage{
+					Name:  ri.Name,
+					Image: ri.Image,
+				})
+			}
 			bundle := declarativeconfig.Bundle{
 				Schema:        helper.Schema,
 				Name:          helper.Name,
 				Properties:    properties,
 				Image:         helper.Image,
-				RelatedImages: helper.RelatedImages,
+				RelatedImages: relatedImages,
 				CsvJSON:       helper.CsvJSON,
 				Objects:       helper.Objects,
 				Package:       helper.Package,
@@ -451,12 +459,21 @@ func unmarshalFBC(fbcContent string) (*declarativeconfig.DeclarativeConfig, erro
 
 			declcfg.Bundles = append(declcfg.Bundles, bundle)
 		case "olm.channel":
+			entries := []declarativeconfig.ChannelEntry{}
+			for _, entry := range helper.Entries {
+				entries = append(entries, declarativeconfig.ChannelEntry{
+					Name:      entry.Name,
+					Replaces:  entry.Replaces,
+					Skips:     entry.Skips,
+					SkipRange: entry.SkipRange,
+				})
+			}
 			channel := declarativeconfig.Channel{
 				Schema:     helper.Schema,
 				Name:       helper.Name,
 				Properties: properties,
 				Package:    helper.Package,
-				Entries:    helper.Entries,
+				Entries:    entries,
 			}
 
 			declcfg.Channels = append(declcfg.Channels, channel)
@@ -484,29 +501,47 @@ func parseProperties(helper *FBCCatchAll) ([]property.Property, error) {
 
 type FBCCatchAll struct {
 	// present in all
-	Schema     string     `json:"schema"`
-	Name       string     `json:"name"`
-	Properties []Property `json:"properties,omitempty" hash:"set"`
+	Schema     string     `json:"schema" yaml:"schema"`
+	Name       string     `json:"name" yaml:"name"`
+	Properties []Property `json:"properties,omitempty" hash:"set" yaml:"properties,omitempty"`
 
 	// Package
-	DefaultChannel string                  `json:"defaultChannel"`
-	Icon           *declarativeconfig.Icon `json:"icon,omitempty"`
-	Description    string                  `json:"description,omitempty"`
+	DefaultChannel string `json:"defaultChannel" yaml:"defaultChannel"`
+	Icon           Icon   `json:"icon,omitempty" yaml:"icon,omitempty"`
+	Description    string `json:"description,omitempty" yaml:"description,omitempty"`
 
 	// All but Package
-	Package string `json:"package"`
+	Package string `json:"package" yaml:"package"`
 
 	// Channel
-	Entries []declarativeconfig.ChannelEntry `json:"entries"`
+	Entries []ChannelEntry `json:"entries" yaml:"entries"`
 
 	// Bundle
-	Image         string                           `json:"image"`
-	RelatedImages []declarativeconfig.RelatedImage `json:"relatedImages,omitempty" hash:"set"`
-	CsvJSON       string                           `json:"-"`
-	Objects       []string                         `json:"-"`
+	Image         string         `json:"image" yaml:"image"`
+	RelatedImages []RelatedImage `json:"relatedImages,omitempty" hash:"set" yaml:"relatedImages,omitempty"`
+	CsvJSON       string         `json:"-" yaml:"-"`
+	Objects       []string       `json:"-" yaml:"-"`
 }
 
+// Note: This is because the declcfg package doesn't have yaml definitions for their fields so we have to recreate the nested fields here.
 type Property struct {
-	Type  string                 `json:"type"`
-	Value map[string]interface{} `json:"value"`
+	Type  string      `json:"type" yaml:"type"`
+	Value interface{} `json:"value" yaml:"value"`
+}
+
+type Icon struct {
+	Data      string `json:"base64data" yaml:"base64data"`
+	MediaType string `json:"mediatype" yaml:"mediatype"`
+}
+
+type ChannelEntry struct {
+	Name      string   `json:"name" yaml:"name"`
+	Replaces  string   `json:"replaces,omitempty" yaml:"replaces,omitempty"`
+	Skips     []string `json:"skips,omitempty" yaml:"skips,omitempty"`
+	SkipRange string   `json:"skipRange,omitempty" yaml:"skipRange,omitempty"`
+}
+
+type RelatedImage struct {
+	Name  string `json:"name" yaml:"name"`
+	Image string `json:"image" yaml:"image"`
 }
